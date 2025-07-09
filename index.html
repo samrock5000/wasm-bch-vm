@@ -44,8 +44,16 @@
   <h1>Transaction Verifier</h1>
   <form id="verifyForm">
     <div class="form-group">
+      <label for="dirSelect">Select Directory:</label>
+      <select id="dirSelect" name="dirSelect">
+        <option value="">Select a directory...</option>
+        <option value="bch_2025_standard">bch_2025_standard</option>
+        <option value="bch_2025_invalid">bch_2025_invalid</option>
+      </select>
+    </div>
+    <div class="form-group">
       <label for="fileSelect">Select Test File:</label>
-      <select id="fileSelect" name="fileSelect">
+      <select id="fileSelect" name="fileSelect" disabled>
         <option value="">Select a file...</option>
       </select>
     </div>
@@ -61,7 +69,7 @@
     </div>
     <div class="form-group">
       <label for="utxoHex">UTXO Hex:</label>
- траг:      <textarea id="utxoHex" name="utxoHex" rows="4" required></textarea>
+      <textarea id="utxoHex" name="utxoHex" rows="4" required></textarea>
     </div>
     <div class="form-group">
       <label for="inputIndex">Input Index:</label>
@@ -82,14 +90,14 @@
     }
 
     // Fetch list of files from GitHub directory using git/trees
-    async function fetchTestFiles() {
+    async function fetchTestFiles(directory) {
       const apiUrl = 'https://api.github.com/repos/bitauth/vmb_tests/git/trees/master?recursive=1';
       try {
         const response = await fetch(apiUrl);
         if (!response.ok) throw new Error('Failed to fetch directory contents');
         const data = await response.json();
         return data.tree
-          .filter(item => item.path.startsWith('bch_2025_standard/') && item.path.endsWith('.vmb_tests.json'))
+          .filter(item => item.path.startsWith(`${directory}/`) && item.path.endsWith('.vmb_tests.json'))
           .map(item => ({
             name: item.path.split('/').pop(),
             url: `https://raw.githubusercontent.com/bitauth/vmb_tests/master/${item.path}`
@@ -114,20 +122,34 @@
       }
     }
 
-    // Populate file select element
+    // Populate file select element based on directory
     async function populateFileSelect() {
+      const dirSelect = document.getElementById('dirSelect');
       const fileSelect = document.getElementById('fileSelect');
       const testSelect = document.getElementById('testSelect');
-      const testFiles = await fetchTestFiles();
 
-      testFiles.forEach(file => {
-        const option = document.createElement('option');
-        option.value = JSON.stringify({ name: file.name, url: file.url });
-        option.textContent = file.name;
-        fileSelect.appendChild(option);
+      dirSelect.addEventListener('change', async () => {
+        const directory = dirSelect.value;
+        fileSelect.innerHTML = '<option value="">Select a file...</option>';
+        fileSelect.disabled = true;
+        testSelect.innerHTML = '<option value="">Select a test...</option>';
+        testSelect.disabled = true;
+        document.getElementById('txHex').value = '';
+        document.getElementById('utxoHex').value = '';
+        document.getElementById('inputIndex').value = 0;
+
+        if (!directory) return;
+
+        const testFiles = await fetchTestFiles(directory);
+        testFiles.forEach(file => {
+          const option = document.createElement('option');
+          option.value = JSON.stringify({ name: file.name, url: file.url });
+          option.textContent = file.name;
+          fileSelect.appendChild(option);
+        });
+        fileSelect.disabled = false;
       });
 
-      // Handle file selection
       fileSelect.addEventListener('change', async () => {
         const selectedValue = fileSelect.value;
         testSelect.innerHTML = '<option value="">Select a test...</option>';
@@ -157,7 +179,6 @@
         testSelect.disabled = false;
       });
 
-      // Handle test selection
       testSelect.addEventListener('change', () => {
         const selectedValue = testSelect.value;
         if (!selectedValue) {
