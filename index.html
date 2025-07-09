@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Transaction Verifier</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .form-group {
+      margin-bottom: 15px;
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+    }
+    input, textarea, select {
+      width: 100%;
+      padding: 8px;
+      box-sizing: border-box;
+    }
+    button {
+      padding: 10px 20px;
+      background-color: #007bff;
+      color: white;
+      border: none;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #0056b3;
+    }
+    #results {
+      margin-top: 20px;
+      padding: 10px;
+      border: 1px solid #ddd;
+    }
+  </style>
+</head>
+<body>
+  <h1>Transaction Verifier</h1>
+  <form id="verifyForm">
+    <div class="form-group">
+      <label for="fileSelect">Select Test File:</label>
+      <select id="fileSelect" name="fileSelect">
+        <option value="">Select a file...</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="testSelect">Select Test:</label>
+      <select id="testSelect" name="testSelect" disabled>
+        <option value="">Select a test...</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="txHex">Transaction Hex:</label>
+      <textarea id="txHex" name="txHex" rows="4" required></textarea>
+    </div>
+    <div class="form-group">
+      <label for="utxoHex">UTXO Hex:</label>
+ траг:      <textarea id="utxoHex" name="utxoHex" rows="4" required></textarea>
+    </div>
+    <div class="form-group">
+      <label for="inputIndex">Input Index:</label>
+      <input type="number" id="inputIndex" name="inputIndex" min="0" value="0" required>
+    </div>
+    <button type="submit">Verify Transaction</button>
+  </form>
+  <div id="results"></div>
+
+  <script type="module">
+    // Helper function to convert hex string to Uint8Array
+    function hexToBytes(hex) {
+      const bytes = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < hex.length; i += 2) {
+        bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+      }
+      return bytes;
+    }
+
+    // Fetch list of files from GitHub directory using git/trees
+    async function fetchTestFiles() {
+      const apiUrl = 'https://api.github.com/repos/bitauth/vmb_tests/git/trees/master?recursive=1';
+      try {
+        const response = await fetch(apiUrl);
+        if (!response.ok) throw new Error('Failed to fetch directory contents');
+        const data = await response.json();
+        return data.tree
+          .filter(item => item.path.startsWith('bch_2025_standard/') && item.path.endsWith('.vmb_tests.json'))
+          .map(item => ({
+            name: item.path.split('/').pop(),
+            url: `https://raw.githubusercontent.com/bitauth/vmb_tests/master/${item.path}`
+          }));
+      } catch (error) {
+        console.error('Error fetching test files:', error);
+        document.getElementById('results').innerHTML = `<p style="color: red;">Error fetching test files: ${error.message}</p>`;
+        return [];
+      }
+    }
+
+    // Fetch test data from a single file
+    async function fetchTestData(url) {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Failed to fetch test data from ${url}`);
+        return await response.json();
+      } catch (error) {
+        console.error(`Error fetching test data from ${url}:`, error);
+        document.getElementById('results').innerHTML = `<p style="color: red;">Error fetching test data: ${error.message}</p>`;
+        return [];
+      }
+    }
+
+    // Populate file select element
+    async function populateFileSelect() {
+      const fileSelect = document.getElementById('fileSelect');
+      const testSelect = document.getElementById('testSelect');
+      const testFiles = await fetchTestFiles();
+
+      testFiles.forEach(file => {
+        const option = document.createElement('option');
+        option.value = JSON.stringify({ name: file.name, url: file.url });
+        option.textContent = file.name;
+        fileSelect.appendChild(option);
+      });
+
+      // Handle file selection
+      fileSelect.addEventListener('change', async () => {
+        const selectedValue = fileSelect.value;
+        testSelect.innerHTML = '<option value="">Select a test...</option>';
+        testSelect.disabled = true;
+        document.getElementById('txHex').value = '';
+        document.getElementById('utxoHex').value = '';
+        document.getElementById('inputIndex').value = 0;
+
+        if (!selectedValue) return;
+
+        const { url } = JSON.parse(selectedValue);
+        const tests = await fetchTestData(url);
+        const skipPhrases = ['authorization', 'before upgrade', 'chip.p2s'];
+
+        tests.forEach(test => {
+          const identifier = test[0];
+          const description = test[1];
+          const shouldSkip = skipPhrases.some(phrase => description.includes(phrase));
+          if (!shouldSkip) {
+            const option = document.createElement('option');
+            option.value = JSON.stringify({ identifier, data: test });
+            option.textContent = `${identifier}: ${description}`;
+            testSelect.appendChild(option);
+          }
+        });
+
+        testSelect.disabled = false;
+      });
+
+      // Handle test selection
+      testSelect.addEventListener('change', () => {
+        const selectedValue = testSelect.value;
+        if (!selectedValue) {
+          document.getElementById('txHex').value = '';
+          document.getElementById('utxoHex').value = '';
+          document.getElementById('inputIndex').value = 0;
+          return;
+        }
+
+        const { data } = JSON.parse(selectedValue);
+        document.getElementById('txHex').value = data[4] || '';
+        document.getElementById('utxoHex').value = data[5] || '';
+        document.getElementById('inputIndex').value = data.length === 7 ? data[6] : 0;
+      });
+    }
+
+    // Initialize WASM verify module
+    async function initVerify() {
+      let lastErrorMessage = '';
+
+      try {
+        const response = await fetch('https://raw.githubusercontent.com/samrock5000/bch-vm/master/wasm/bch-vm.wasm');
+        if (!response.ok) throw new Error('Failed to fetch WASM file');
+        const wasmSource = await response.arrayBuffer();
+        const typedArray = new Uint8Array(wasmSource);
+        const wasm = await WebAssembly.instantiate(typedArray, {
+          env: {
+            wasm_log: (ptr, len) => {
+              const memoryView = new Uint8Array(wasm.instance.exports.memory.buffer);
+              const message = new TextDecoder().decode(memoryView.slice(ptr, ptr + len));
+              console.log('[WASM]', message);
+              lastErrorMessage = message;
+            },
+          },
+        });
+        const { verify, memory } = wasm.instance.exports;
+
+        return {
+          verifyProgram: function (program) {
+            if (!program || typeof program.inputIndex !== 'number' || !program.transaction || !program.sourceOutputs) {
+              throw new Error('Invalid program object');
+            }
+
+            const txData = program.transaction;
+            const utxoData = program.sourceOutputs;
+            const txLength = txData.length;
+            const utxoLength = utxoData.length;
+            const memoryView = new Uint8Array(memory.buffer);
+
+            memoryView.set(txData, 0);
+            const utxoOffset = txLength;
+            memoryView.set(utxoData, utxoOffset);
+
+            lastErrorMessage = '';
+            let result = verify(0, txLength, utxoOffset, utxoLength, program.inputIndex);
+
+            return {
+              success: result === 1,
+              errorMessage: lastErrorMessage
+            };
+          }
+        };
+      } catch (error) {
+        throw new Error(`WASM initialization failed: ${error.message}`);
+      }
+    }
+
+    // Initialize the verify function and populate files
+    let verifyModule;
+    try {
+      verifyModule = await initVerify();
+      await populateFileSelect();
+    } catch (error) {
+      document.getElementById('results').innerHTML = `<p style="color: red;">Initialization Error: ${error.message}</p>`;
+      throw error;
+    }
+
+    // Form submission handler
+    const form = document.getElementById('verifyForm');
+    const resultsDiv = document.getElementById('results');
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      resultsDiv.innerHTML = 'Processing...';
+
+      try {
+        const txHex = document.getElementById('txHex').value.trim();
+        const utxoHex = document.getElementById('utxoHex').value.trim();
+        const inputIndex = parseInt(document.getElementById('inputIndex').value);
+
+        // Convert hex to bytes
+        const transaction = hexToBytes(txHex);
+        if (!transaction || transaction.length === 0) {
+          throw new Error('Invalid transaction hex');
+        }
+
+        const sourceOutputs = hexToBytes(utxoHex);
+        if (!sourceOutputs || sourceOutputs.length === 0) {
+          throw new Error('Invalid UTXO hex');
+        }
+
+        // Create program object
+        const program = {
+          inputIndex,
+          sourceOutputs,
+          transaction,
+        };
+
+        // Verify with WASM
+        const wasmResult = verifyModule.verifyProgram(program);
+
+        // Display results
+        resultsDiv.innerHTML = `
+          <h3>Verification Results:</h3>
+          <p><strong>WASM Verify:</strong> ${wasmResult.success ? 'Valid' : `Invalid${wasmResult.errorMessage ? ' - ' + wasmResult.errorMessage : ''}`}</p>
+        `;
+      } catch (error) {
+        resultsDiv.innerHTML = `<p style="color: red;">Error: ${error.message}</p>`;
+      }
+    });
+  </script>
+</body>
+</html>
